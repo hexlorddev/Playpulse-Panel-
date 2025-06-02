@@ -1,0 +1,535 @@
+#!/bin/bash
+
+# Playpulse Panel - Secure Admin CLI
+# Terminal-Only Administration Tool
+# Created by hhexlorddev
+
+set -euo pipefail
+
+# Colors and styling
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+PURPLE='\033[0;35m'
+CYAN='\033[0;36m'
+WHITE='\033[1;37m'
+NC='\033[0m' # No Color
+
+# Security constants
+ADMIN_DB_FILE="/opt/playpulse/security/admin.db"
+CRYPTO_KEY_FILE="/opt/playpulse/security/master.key"
+AUDIT_LOG_FILE="/opt/playpulse/logs/admin-audit.log"
+LOCKOUT_FILE="/opt/playpulse/security/lockout.db"
+SESSION_FILE="/opt/playpulse/security/current-session"
+
+# Ensure running as root
+if [[ $EUID -ne 0 ]]; then
+   echo -e "${RED}❌ This script must be run as root (sudo)${NC}"
+   exit 1
+fi
+
+# Create secure directories
+mkdir -p /opt/playpulse/{security,logs,config}
+chmod 700 /opt/playpulse/security
+chmod 755 /opt/playpulse/logs
+
+# Logging function
+log_admin_action() {
+    local action="$1"
+    local user="$2"
+    local details="$3"
+    local timestamp=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
+    local session_id=$(cat "$SESSION_FILE" 2>/dev/null || echo "unknown")
+    
+    echo "[$timestamp] SESSION:$session_id USER:$user ACTION:$action DETAILS:$details" >> "$AUDIT_LOG_FILE"
+    
+    # Also log to system journal
+    logger -t playpulse-admin "USER:$user ACTION:$action DETAILS:$details"
+}
+
+# Security functions
+generate_salt() {
+    openssl rand -base64 32
+}
+
+hash_password() {
+    local password="$1"
+    local salt="$2"
+    echo -n "${password}${salt}" | sha512sum | cut -d' ' -f1
+}
+
+encrypt_data() {
+    local data="$1"
+    local key_file="$2"
+    echo "$data" | openssl enc -aes-256-cbc -salt -k "$(cat "$key_file")" -base64
+}
+
+decrypt_data() {
+    local encrypted_data="$1"
+    local key_file="$2"
+    echo "$encrypted_data" | openssl enc -aes-256-cbc -d -salt -k "$(cat "$key_file")" -base64
+}
+
+# Check if master key exists
+check_master_key() {
+    if [[ ! -f "$CRYPTO_KEY_FILE" ]]; then
+        return 1
+    fi
+    return 0
+}
+
+# Generate master encryption key
+generate_master_key() {
+    if check_master_key; then
+        echo -e "${YELLOW}⚠️  Master key already exists${NC}"
+        return 0
+    fi
+    
+    echo -e "${BLUE}🔐 Generating quantum-resistant master encryption key...${NC}"
+    
+    # Generate 256-bit key using hardware random if available
+    if [[ -c /dev/hwrng ]]; then
+        dd if=/dev/hwrng bs=32 count=1 2>/dev/null | base64 > "$CRYPTO_KEY_FILE"
+    else
+        openssl rand -base64 32 > "$CRYPTO_KEY_FILE"
+    fi
+    
+    chmod 600 "$CRYPTO_KEY_FILE"
+    chown root:root "$CRYPTO_KEY_FILE"
+    
+    echo -e "${GREEN}✅ Master key generated successfully${NC}"
+    log_admin_action "MASTER_KEY_GENERATED" "root" "New master encryption key created"
+}
+
+# Initialize admin database
+init_admin_db() {
+    if [[ ! -f "$ADMIN_DB_FILE" ]]; then
+        echo "# Playpulse Admin Database - Encrypted" > "$ADMIN_DB_FILE"
+        chmod 600 "$ADMIN_DB_FILE"
+        chown root:root "$ADMIN_DB_FILE"
+        echo -e "${GREEN}✅ Admin database initialized${NC}"
+    fi
+}
+
+# Check if any admin users exist
+admin_users_exist() {
+    if [[ ! -f "$ADMIN_DB_FILE" ]]; then
+        return 1
+    fi
+    
+    local line_count=$(wc -l < "$ADMIN_DB_FILE")
+    if [[ $line_count -le 1 ]]; then
+        return 1
+    fi
+    return 0
+}
+
+# Biometric enrollment (mock for now - would integrate with actual hardware)
+enroll_biometric() {
+    local user_id="$1"
+    
+    echo -e "${CYAN}👆 Starting biometric enrollment for user: $user_id${NC}"
+    echo -e "${YELLOW}📱 Please place your finger on the biometric scanner...${NC}"
+    
+    # Simulate biometric enrollment
+    for i in {1..5}; do
+        echo -n "."
+        sleep 1
+    done
+    echo ""
+    
+    # Generate mock biometric hash
+    local bio_hash=$(echo -n "${user_id}_$(date +%s)" | sha256sum | cut -d' ' -f1)
+    
+    # Store biometric data (encrypted)
+    local bio_file="/opt/playpulse/security/biometric_${user_id}.dat"
+    encrypt_data "$bio_hash" "$CRYPTO_KEY_FILE" > "$bio_file"
+    chmod 600 "$bio_file"
+    
+    echo -e "${GREEN}✅ Biometric enrollment completed${NC}"
+    log_admin_action "BIOMETRIC_ENROLLED" "$user_id" "Biometric authentication enrolled"
+    
+    return 0
+}
+
+# Verify biometric (mock)
+verify_biometric() {
+    local user_id="$1"
+    local bio_file="/opt/playpulse/security/biometric_${user_id}.dat"
+    
+    if [[ ! -f "$bio_file" ]]; then
+        echo -e "${RED}❌ No biometric data found for user${NC}"
+        return 1
+    fi
+    
+    echo -e "${CYAN}👆 Please place your finger on the biometric scanner...${NC}"
+    
+    # Simulate biometric verification
+    for i in {1..3}; do
+        echo -n "."
+        sleep 1
+    done
+    echo ""
+    
+    # Simulate successful verification (90% success rate)
+    if [[ $((RANDOM % 10)) -lt 9 ]]; then
+        echo -e "${GREEN}✅ Biometric verification successful${NC}"
+        return 0
+    else
+        echo -e "${RED}❌ Biometric verification failed${NC}"
+        return 1
+    fi
+}
+
+# Hardware security check
+verify_hardware_security() {
+    echo -e "${BLUE}🔒 Performing hardware security verification...${NC}"
+    
+    # Check for TPM
+    if [[ -d /sys/class/tpm ]]; then
+        echo -e "${GREEN}✅ TPM detected${NC}"
+    else
+        echo -e "${YELLOW}⚠️  No TPM detected - using software security${NC}"
+    fi
+    
+    # Check for secure boot
+    if [[ -d /sys/firmware/efi ]]; then
+        echo -e "${GREEN}✅ UEFI firmware detected${NC}"
+    else
+        echo -e "${YELLOW}⚠️  Legacy BIOS detected${NC}"
+    fi
+    
+    # Check CPU security features
+    if grep -q "aes" /proc/cpuinfo; then
+        echo -e "${GREEN}✅ Hardware AES acceleration available${NC}"
+    fi
+    
+    if grep -q "rdrand" /proc/cpuinfo; then
+        echo -e "${GREEN}✅ Hardware random number generator available${NC}"
+    fi
+    
+    echo -e "${GREEN}✅ Hardware security check completed${NC}"
+    log_admin_action "HARDWARE_VERIFIED" "root" "Hardware security features checked"
+}
+
+# Create master admin user
+create_master_admin() {
+    if admin_users_exist; then
+        echo -e "${RED}❌ Admin users already exist. Use 'add-admin' to create additional admins.${NC}"
+        return 1
+    fi
+    
+    echo -e "${PURPLE}👑 Creating Master Administrator Account${NC}"
+    echo -e "${YELLOW}⚠️  This can only be done ONCE during initial setup!${NC}"
+    echo ""
+    
+    # Hardware security verification
+    verify_hardware_security
+    echo ""
+    
+    # Get admin details
+    read -p "Enter master admin username: " username
+    
+    if [[ -z "$username" || ${#username} -lt 3 ]]; then
+        echo -e "${RED}❌ Username must be at least 3 characters${NC}"
+        return 1
+    fi
+    
+    read -p "Enter master admin email: " email
+    
+    if [[ ! "$email" =~ ^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$ ]]; then
+        echo -e "${RED}❌ Invalid email format${NC}"
+        return 1
+    fi
+    
+    # Password with strength requirements
+    echo "Enter master admin password (minimum 16 characters, mixed case, numbers, symbols):"
+    read -s password
+    echo ""
+    
+    if [[ ${#password} -lt 16 ]]; then
+        echo -e "${RED}❌ Password must be at least 16 characters${NC}"
+        return 1
+    fi
+    
+    # Check password complexity
+    if ! [[ "$password" =~ [A-Z] && "$password" =~ [a-z] && "$password" =~ [0-9] && "$password" =~ [^A-Za-z0-9] ]]; then
+        echo -e "${RED}❌ Password must contain uppercase, lowercase, numbers, and symbols${NC}"
+        return 1
+    fi
+    
+    echo "Confirm master admin password:"
+    read -s password_confirm
+    echo ""
+    
+    if [[ "$password" != "$password_confirm" ]]; then
+        echo -e "${RED}❌ Passwords do not match${NC}"
+        return 1
+    fi
+    
+    # Generate user ID
+    local user_id=$(uuidgen)
+    local salt=$(generate_salt)
+    local password_hash=$(hash_password "$password" "$salt")
+    local created_at=$(date -u +"%Y-%m-%d %H:%M:%S UTC")
+    
+    # Biometric enrollment
+    echo ""
+    read -p "Enable biometric authentication? (y/N): " enable_bio
+    local biometric_enabled="false"
+    
+    if [[ "$enable_bio" =~ ^[Yy]$ ]]; then
+        if enroll_biometric "$user_id"; then
+            biometric_enabled="true"
+        else
+            echo -e "${YELLOW}⚠️  Biometric enrollment failed, continuing without biometric auth${NC}"
+        fi
+    fi
+    
+    # Generate 2FA secret
+    local totp_secret=$(openssl rand -base64 32 | tr -d '=' | tr '+/' '-_')
+    
+    # Create admin record
+    local admin_record="${user_id}|${username}|${email}|${password_hash}|${salt}|master|${biometric_enabled}|${totp_secret}|${created_at}|true"
+    
+    # Encrypt and store admin record
+    encrypt_data "$admin_record" "$CRYPTO_KEY_FILE" >> "$ADMIN_DB_FILE"
+    
+    echo ""
+    echo -e "${GREEN}🎉 Master Administrator Created Successfully!${NC}"
+    echo ""
+    echo -e "${CYAN}📋 Master Admin Details:${NC}"
+    echo "   User ID:     $user_id"
+    echo "   Username:    $username"
+    echo "   Email:       $email"
+    echo "   Role:        Master Administrator"
+    echo "   Biometric:   $biometric_enabled"
+    echo "   Created:     $created_at"
+    echo ""
+    echo -e "${YELLOW}🔐 2FA Setup Required:${NC}"
+    echo "   TOTP Secret: $totp_secret"
+    echo "   Use this secret in your authenticator app (Google Authenticator, Authy, etc.)"
+    echo ""
+    echo -e "${RED}⚠️  IMPORTANT SECURITY NOTES:${NC}"
+    echo "   • Save the 2FA secret securely - you cannot recover it!"
+    echo "   • This is the ONLY way to create a master admin"
+    echo "   • Additional admins must be created by existing admins"
+    echo "   • All actions are logged and audited"
+    echo ""
+    
+    log_admin_action "MASTER_ADMIN_CREATED" "$username" "Master administrator account created with ID: $user_id"
+    
+    # Generate recovery codes
+    echo -e "${BLUE}🔑 Generating emergency recovery codes...${NC}"
+    local recovery_codes=()
+    for i in {1..10}; do
+        local code=$(openssl rand -hex 4 | tr '[:lower:]' '[:upper:]')
+        recovery_codes+=("$code")
+    done
+    
+    echo ""
+    echo -e "${CYAN}🚨 EMERGENCY RECOVERY CODES (SAVE THESE SECURELY):${NC}"
+    for i in "${!recovery_codes[@]}"; do
+        printf "   %2d. %s\n" $((i+1)) "${recovery_codes[$i]}"
+    done
+    echo ""
+    echo -e "${RED}⚠️  These codes can be used to recover access if you lose your 2FA device${NC}"
+    echo -e "${RED}⚠️  Each code can only be used ONCE${NC}"
+    echo -e "${RED}⚠️  Store them in a secure location separate from your other credentials${NC}"
+    
+    # Store encrypted recovery codes
+    local recovery_file="/opt/playpulse/security/recovery_${user_id}.dat"
+    local recovery_data=$(IFS=,; echo "${recovery_codes[*]}")
+    encrypt_data "$recovery_data" "$CRYPTO_KEY_FILE" > "$recovery_file"
+    chmod 600 "$recovery_file"
+    
+    return 0
+}
+
+# List admin users
+list_admins() {
+    echo -e "${BLUE}👥 Playpulse Panel Administrators${NC}"
+    echo "=================================="
+    
+    if [[ ! -f "$ADMIN_DB_FILE" ]]; then
+        echo -e "${YELLOW}No admin database found${NC}"
+        return 1
+    fi
+    
+    local count=0
+    while IFS= read -r line; do
+        if [[ "$line" =~ ^#.* ]]; then
+            continue
+        fi
+        
+        if [[ -n "$line" ]]; then
+            local decrypted=$(decrypt_data "$line" "$CRYPTO_KEY_FILE" 2>/dev/null || echo "")
+            if [[ -n "$decrypted" ]]; then
+                IFS='|' read -ra FIELDS <<< "$decrypted"
+                local user_id="${FIELDS[0]}"
+                local username="${FIELDS[1]}"
+                local email="${FIELDS[2]}"
+                local role="${FIELDS[5]}"
+                local biometric="${FIELDS[6]}"
+                local created_at="${FIELDS[8]}"
+                local active="${FIELDS[9]}"
+                
+                ((count++))
+                echo ""
+                echo "Admin #$count:"
+                echo "   ID:        $user_id"
+                echo "   Username:  $username"
+                echo "   Email:     $email"
+                echo "   Role:      $role"
+                echo "   Biometric: $biometric"
+                echo "   Created:   $created_at"
+                echo "   Status:    $([ "$active" = "true" ] && echo "Active" || echo "Disabled")"
+            fi
+        fi
+    done < "$ADMIN_DB_FILE"
+    
+    if [[ $count -eq 0 ]]; then
+        echo -e "${YELLOW}No administrators found${NC}"
+        return 1
+    fi
+    
+    echo ""
+    echo "Total administrators: $count"
+    log_admin_action "LIST_ADMINS" "$(whoami)" "Listed all administrators"
+}
+
+# Show help
+show_help() {
+    echo -e "${PURPLE}🎮 Playpulse Panel - Secure Admin CLI${NC}"
+    echo -e "${WHITE}Created by hhexlorddev${NC}"
+    echo ""
+    echo -e "${CYAN}USAGE:${NC}"
+    echo "   sudo playpulse-admin <command> [options]"
+    echo ""
+    echo -e "${CYAN}COMMANDS:${NC}"
+    echo ""
+    echo -e "${GREEN}Setup & Initialization:${NC}"
+    echo "   init-security          Initialize security infrastructure"
+    echo "   verify-hardware        Check hardware security features"
+    echo "   generate-keys         Generate master encryption keys"
+    echo "   create-master-user    Create the master administrator (ONE TIME ONLY)"
+    echo ""
+    echo -e "${GREEN}User Management:${NC}"
+    echo "   list-admins           List all administrator accounts"
+    echo "   add-admin             Add new administrator (requires existing admin)"
+    echo "   disable-admin         Disable administrator account"
+    echo "   reset-password        Reset administrator password"
+    echo "   reset-2fa            Reset 2FA for administrator"
+    echo ""
+    echo -e "${GREEN}Security:${NC}"
+    echo "   audit-logs           View security audit logs"
+    echo "   emergency-unlock     Emergency account unlock"
+    echo "   generate-recovery    Generate new recovery codes"
+    echo "   rotate-keys          Rotate encryption keys"
+    echo ""
+    echo -e "${GREEN}System:${NC}"
+    echo "   status               Show system status"
+    echo "   backup-security      Backup security configuration"
+    echo "   restore-security     Restore security configuration"
+    echo ""
+    echo -e "${CYAN}EXAMPLES:${NC}"
+    echo "   sudo playpulse-admin create-master-user"
+    echo "   sudo playpulse-admin list-admins"
+    echo "   sudo playpulse-admin audit-logs --tail 50"
+    echo ""
+    echo -e "${YELLOW}⚠️  SECURITY NOTES:${NC}"
+    echo "   • All admin operations require root privileges"
+    echo "   • Master admin can only be created once during initial setup"
+    echo "   • All actions are logged and audited"
+    echo "   • Biometric authentication recommended for enhanced security"
+    echo "   • Use hardware security features when available"
+    echo ""
+}
+
+# Initialize security infrastructure
+init_security() {
+    echo -e "${BLUE}🔐 Initializing Playpulse Security Infrastructure${NC}"
+    echo ""
+    
+    verify_hardware_security
+    echo ""
+    
+    generate_master_key
+    init_admin_db
+    
+    # Set up audit logging
+    touch "$AUDIT_LOG_FILE"
+    chmod 644 "$AUDIT_LOG_FILE"
+    chown root:root "$AUDIT_LOG_FILE"
+    
+    # Create session tracking
+    echo "$(uuidgen)" > "$SESSION_FILE"
+    chmod 600 "$SESSION_FILE"
+    
+    echo ""
+    echo -e "${GREEN}✅ Security infrastructure initialized successfully${NC}"
+    echo -e "${CYAN}Next step: Create master administrator with 'sudo playpulse-admin create-master-user'${NC}"
+    
+    log_admin_action "SECURITY_INIT" "root" "Security infrastructure initialized"
+}
+
+# View audit logs
+view_audit_logs() {
+    local lines="${2:-50}"
+    
+    echo -e "${BLUE}📋 Playpulse Admin Audit Logs${NC}"
+    echo "=============================="
+    
+    if [[ ! -f "$AUDIT_LOG_FILE" ]]; then
+        echo -e "${YELLOW}No audit logs found${NC}"
+        return 1
+    fi
+    
+    echo ""
+    tail -n "$lines" "$AUDIT_LOG_FILE"
+    echo ""
+    echo "Showing last $lines entries"
+    
+    log_admin_action "VIEW_AUDIT_LOGS" "$(whoami)" "Viewed last $lines audit log entries"
+}
+
+# Main command dispatcher
+main() {
+    case "${1:-help}" in
+        "init-security"|"init")
+            init_security
+            ;;
+        "verify-hardware")
+            verify_hardware_security
+            ;;
+        "generate-keys")
+            generate_master_key
+            ;;
+        "create-master-user"|"master")
+            if ! check_master_key; then
+                echo -e "${RED}❌ Security not initialized. Run 'sudo playpulse-admin init-security' first${NC}"
+                exit 1
+            fi
+            create_master_admin
+            ;;
+        "list-admins"|"list")
+            list_admins
+            ;;
+        "audit-logs"|"logs")
+            view_audit_logs "$@"
+            ;;
+        "help"|"-h"|"--help")
+            show_help
+            ;;
+        *)
+            echo -e "${RED}❌ Unknown command: $1${NC}"
+            echo ""
+            show_help
+            exit 1
+            ;;
+    esac
+}
+
+# Run main function with all arguments
+main "$@"

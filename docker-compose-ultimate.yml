@@ -1,0 +1,654 @@
+version: '3.8'
+
+# Playpulse Panel - Ultimate Beast Panel
+# Created by hhexlorddev
+# The most advanced game server control panel ever created
+
+services:
+  ###########################################
+  # CORE INFRASTRUCTURE
+  ###########################################
+  
+  # Primary Database - PostgreSQL with Extensions
+  postgres:
+    image: postgres:15-alpine
+    container_name: playpulse_postgres
+    environment:
+      POSTGRES_DB: playpulse_panel
+      POSTGRES_USER: playpulse
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-playpulse_password}
+      POSTGRES_INITDB_ARGS: "--auth-host=scram-sha-256"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/01-init.sql
+      - ./docker/postgres/extensions.sql:/docker-entrypoint-initdb.d/02-extensions.sql
+    ports:
+      - "5432:5432"
+    networks:
+      - playpulse_internal
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U playpulse -d playpulse_panel"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 2G
+          cpus: '1.0'
+
+  # Redis - Caching and Session Storage
+  redis:
+    image: redis:7-alpine
+    container_name: playpulse_redis
+    command: >
+      redis-server 
+      --requirepass ${REDIS_PASSWORD:-playpulse_redis_password}
+      --appendonly yes
+      --appendfsync everysec
+      --maxmemory 1gb
+      --maxmemory-policy allkeys-lru
+    volumes:
+      - redis_data:/data
+      - ./docker/redis/redis.conf:/usr/local/etc/redis/redis.conf
+    ports:
+      - "6379:6379"
+    networks:
+      - playpulse_internal
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Message Queue - RabbitMQ
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    container_name: playpulse_rabbitmq
+    environment:
+      RABBITMQ_DEFAULT_USER: playpulse
+      RABBITMQ_DEFAULT_PASS: ${RABBITMQ_PASSWORD:-playpulse_rabbitmq_password}
+      RABBITMQ_DEFAULT_VHOST: playpulse
+    volumes:
+      - rabbitmq_data:/var/lib/rabbitmq
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    networks:
+      - playpulse_internal
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "rabbitmq-diagnostics", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  ###########################################
+  # CORE APPLICATION SERVICES
+  ###########################################
+
+  # Backend API - Go Application
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: production
+    container_name: playpulse_backend
+    environment:
+      # Database
+      - DB_HOST=postgres
+      - DB_PORT=5432
+      - DB_USER=playpulse
+      - DB_PASSWORD=${DB_PASSWORD:-playpulse_password}
+      - DB_NAME=playpulse_panel
+      - DB_SSL_MODE=disable
+      
+      # Redis
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      - REDIS_PASSWORD=${REDIS_PASSWORD:-playpulse_redis_password}
+      
+      # JWT
+      - JWT_SECRET=${JWT_SECRET:-change-this-secret-key}
+      - JWT_REFRESH_SECRET=${JWT_REFRESH_SECRET:-change-this-refresh-secret}
+      - JWT_EXPIRE_HOURS=24
+      - JWT_REFRESH_EXPIRE_DAYS=30
+      
+      # Server
+      - PORT=8080
+      - ENVIRONMENT=production
+      - API_PREFIX=/api/v1
+      - CORS_ORIGINS=${FRONTEND_URL:-http://localhost:3000}
+      
+      # External APIs
+      - CURSEFORGE_API_KEY=${CURSEFORGE_API_KEY}
+      - MODRINTH_API_KEY=${MODRINTH_API_KEY}
+      - GITHUB_TOKEN=${GITHUB_TOKEN}
+      
+      # File Storage
+      - UPLOAD_PATH=/app/uploads
+      - BACKUP_PATH=/app/backups
+      - MAX_FILE_SIZE=1GB
+      
+      # Features
+      - ENABLE_ANALYTICS=true
+      - ENABLE_MARKETPLACE=true
+      - ENABLE_AI_FEATURES=true
+      - ENABLE_MULTI_NODE=true
+    volumes:
+      - server_data:/opt/minecraft-servers
+      - backup_data:/app/backups
+      - upload_data:/app/uploads
+      - ./docker/ssl:/app/ssl
+      - /var/run/docker.sock:/var/run/docker.sock
+    ports:
+      - "8080:8080"
+    networks:
+      - playpulse_internal
+      - playpulse_external
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+          cpus: '2.0'
+
+  # Frontend - React Application
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      target: production
+      args:
+        - REACT_APP_API_URL=${API_URL:-http://localhost:8080/api/v1}
+        - REACT_APP_WS_URL=${WS_URL:-ws://localhost:8080/ws}
+        - REACT_APP_ENVIRONMENT=production
+    container_name: playpulse_frontend
+    volumes:
+      - ./docker/nginx/frontend.conf:/etc/nginx/conf.d/default.conf
+    ports:
+      - "3000:80"
+    networks:
+      - playpulse_external
+    depends_on:
+      - backend
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:80/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  ###########################################
+  # MULTI-NODE SERVICES
+  ###########################################
+
+  # Node Agent for Multi-VPS Support
+  node-agent:
+    build:
+      context: ./nodes/agent
+      dockerfile: Dockerfile
+    container_name: playpulse_node_agent
+    environment:
+      - PLAYPULSE_NODE_ID=${NODE_ID:-node-1}
+      - PLAYPULSE_NODE_NAME=${NODE_NAME:-Primary Node}
+      - PLAYPULSE_NODE_LOCATION=${NODE_LOCATION:-us-east-1}
+      - PLAYPULSE_CONTROL_PLANE=${CONTROL_PLANE:-backend:8080}
+      - PLAYPULSE_NODE_TOKEN=${NODE_TOKEN:-secure-node-token}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - server_data:/opt/playpulse/servers
+      - node_metrics:/opt/playpulse/metrics
+    ports:
+      - "8090:8090"
+    networks:
+      - playpulse_internal
+    depends_on:
+      - backend
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '0.5'
+
+  ###########################################
+  # MONITORING & ANALYTICS
+  ###########################################
+
+  # Prometheus - Metrics Collection
+  prometheus:
+    image: prom/prometheus:latest
+    container_name: playpulse_prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/etc/prometheus/console_libraries'
+      - '--web.console.templates=/etc/prometheus/consoles'
+      - '--storage.tsdb.retention.time=30d'
+      - '--web.enable-lifecycle'
+      - '--web.enable-admin-api'
+    volumes:
+      - ./docker/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    networks:
+      - playpulse_internal
+    restart: unless-stopped
+    profiles:
+      - monitoring
+
+  # Grafana - Metrics Visualization
+  grafana:
+    image: grafana/grafana:latest
+    container_name: playpulse_grafana
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-admin}
+      - GF_USERS_ALLOW_SIGN_UP=false
+      - GF_INSTALL_PLUGINS=grafana-clock-panel,grafana-simple-json-datasource,grafana-worldmap-panel
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./docker/grafana/provisioning:/etc/grafana/provisioning
+      - ./docker/grafana/dashboards:/var/lib/grafana/dashboards
+    ports:
+      - "3001:3000"
+    networks:
+      - playpulse_internal
+    depends_on:
+      - prometheus
+    restart: unless-stopped
+    profiles:
+      - monitoring
+
+  # InfluxDB - Time Series Database
+  influxdb:
+    image: influxdb:2.7-alpine
+    container_name: playpulse_influxdb
+    environment:
+      - DOCKER_INFLUXDB_INIT_MODE=setup
+      - DOCKER_INFLUXDB_INIT_USERNAME=playpulse
+      - DOCKER_INFLUXDB_INIT_PASSWORD=${INFLUXDB_PASSWORD:-playpulse_influx_password}
+      - DOCKER_INFLUXDB_INIT_ORG=playpulse
+      - DOCKER_INFLUXDB_INIT_BUCKET=metrics
+      - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=${INFLUXDB_TOKEN:-super-secret-auth-token}
+    volumes:
+      - influxdb_data:/var/lib/influxdb2
+    ports:
+      - "8086:8086"
+    networks:
+      - playpulse_internal
+    restart: unless-stopped
+    profiles:
+      - analytics
+
+  # Elasticsearch - Log Aggregation & Search
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.11.0
+    container_name: playpulse_elasticsearch
+    environment:
+      - node.name=playpulse-es
+      - cluster.name=playpulse-cluster
+      - discovery.type=single-node
+      - bootstrap.memory_lock=true
+      - "ES_JAVA_OPTS=-Xms1g -Xmx1g"
+      - xpack.security.enabled=false
+      - xpack.security.enrollment.enabled=false
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+    volumes:
+      - elasticsearch_data:/usr/share/elasticsearch/data
+    ports:
+      - "9200:9200"
+    networks:
+      - playpulse_internal
+    restart: unless-stopped
+    profiles:
+      - logging
+
+  # Kibana - Log Visualization
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.11.0
+    container_name: playpulse_kibana
+    environment:
+      - ELASTICSEARCH_HOSTS=http://elasticsearch:9200
+      - SERVER_NAME=playpulse-kibana
+      - SERVER_HOST=0.0.0.0
+    ports:
+      - "5601:5601"
+    networks:
+      - playpulse_internal
+    depends_on:
+      - elasticsearch
+    restart: unless-stopped
+    profiles:
+      - logging
+
+  ###########################################
+  # SECURITY & BACKUP
+  ###########################################
+
+  # Vault - Secrets Management
+  vault:
+    image: vault:latest
+    container_name: playpulse_vault
+    cap_add:
+      - IPC_LOCK
+    environment:
+      - VAULT_DEV_ROOT_TOKEN_ID=${VAULT_ROOT_TOKEN:-playpulse-vault-token}
+      - VAULT_DEV_LISTEN_ADDRESS=0.0.0.0:8200
+    volumes:
+      - vault_data:/vault/data
+      - ./docker/vault/config:/vault/config
+    ports:
+      - "8200:8200"
+    networks:
+      - playpulse_internal
+    restart: unless-stopped
+    profiles:
+      - security
+
+  # MinIO - S3-Compatible Object Storage
+  minio:
+    image: minio/minio:latest
+    container_name: playpulse_minio
+    command: server /data --console-address ":9001"
+    environment:
+      - MINIO_ROOT_USER=${MINIO_ROOT_USER:-playpulse}
+      - MINIO_ROOT_PASSWORD=${MINIO_ROOT_PASSWORD:-playpulse_minio_password}
+    volumes:
+      - minio_data:/data
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    networks:
+      - playpulse_internal
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 30s
+      timeout: 20s
+      retries: 3
+
+  ###########################################
+  # AI & MACHINE LEARNING
+  ###########################################
+
+  # TensorFlow Serving - AI Model Serving
+  tensorflow:
+    image: tensorflow/serving:latest
+    container_name: playpulse_tensorflow
+    environment:
+      - MODEL_NAME=playpulse_predictor
+    volumes:
+      - ./ai/models:/models
+    ports:
+      - "8501:8501"
+      - "8500:8500"
+    networks:
+      - playpulse_internal
+    restart: unless-stopped
+    profiles:
+      - ai
+
+  # Jupyter - AI Development Environment
+  jupyter:
+    image: jupyter/tensorflow-notebook:latest
+    container_name: playpulse_jupyter
+    environment:
+      - JUPYTER_ENABLE_LAB=yes
+      - JUPYTER_TOKEN=${JUPYTER_TOKEN:-playpulse_jupyter_token}
+    volumes:
+      - jupyter_data:/home/jovyan/work
+      - ./analytics:/home/jovyan/work/analytics
+    ports:
+      - "8888:8888"
+    networks:
+      - playpulse_internal
+    restart: unless-stopped
+    profiles:
+      - ai
+
+  ###########################################
+  # NETWORKING & LOAD BALANCING
+  ###########################################
+
+  # Nginx - Reverse Proxy & Load Balancer
+  nginx:
+    image: nginx:alpine
+    container_name: playpulse_nginx
+    volumes:
+      - ./docker/nginx/nginx.conf:/etc/nginx/nginx.conf
+      - ./docker/nginx/conf.d:/etc/nginx/conf.d
+      - ./docker/ssl:/etc/nginx/ssl
+      - nginx_logs:/var/log/nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    networks:
+      - playpulse_external
+      - playpulse_internal
+    depends_on:
+      - backend
+      - frontend
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "nginx", "-t"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Traefik - Advanced Load Balancer (Alternative)
+  traefik:
+    image: traefik:v3.0
+    container_name: playpulse_traefik
+    command:
+      - "--api.insecure=true"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - ./docker/traefik:/etc/traefik
+    ports:
+      - "8081:80"
+      - "8443:443"
+      - "8082:8080"
+    networks:
+      - playpulse_external
+      - playpulse_internal
+    restart: unless-stopped
+    profiles:
+      - traefik
+
+  ###########################################
+  # GAME SERVER MANAGEMENT
+  ###########################################
+
+  # Pterodactyl Wings Alternative - Game Server Manager
+  game-manager:
+    build:
+      context: ./gameserver
+      dockerfile: Dockerfile
+    container_name: playpulse_game_manager
+    privileged: true
+    environment:
+      - PLAYPULSE_API_URL=http://backend:8080/api/v1
+      - PLAYPULSE_API_TOKEN=${GAME_MANAGER_TOKEN:-secure-game-manager-token}
+      - DOCKER_HOST=unix:///var/run/docker.sock
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - server_data:/opt/playpulse/servers
+      - game_templates:/opt/playpulse/templates
+    networks:
+      - playpulse_internal
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  ###########################################
+  # TESTING & DEVELOPMENT
+  ###########################################
+
+  # Mailhog - Email Testing
+  mailhog:
+    image: mailhog/mailhog:latest
+    container_name: playpulse_mailhog
+    ports:
+      - "1025:1025"
+      - "8025:8025"
+    networks:
+      - playpulse_internal
+    restart: unless-stopped
+    profiles:
+      - development
+
+  # Adminer - Database Management
+  adminer:
+    image: adminer:latest
+    container_name: playpulse_adminer
+    environment:
+      - ADMINER_DEFAULT_SERVER=postgres
+      - ADMINER_DESIGN=dracula
+    ports:
+      - "8083:8080"
+    networks:
+      - playpulse_internal
+    depends_on:
+      - postgres
+    restart: unless-stopped
+    profiles:
+      - development
+
+  # Redis Commander - Redis Management
+  redis-commander:
+    image: rediscommander/redis-commander:latest
+    container_name: playpulse_redis_commander
+    environment:
+      - REDIS_HOSTS=local:redis:6379:0:${REDIS_PASSWORD:-playpulse_redis_password}
+    ports:
+      - "8084:8081"
+    networks:
+      - playpulse_internal
+    depends_on:
+      - redis
+    restart: unless-stopped
+    profiles:
+      - development
+
+###########################################
+# NETWORKS
+###########################################
+
+networks:
+  playpulse_external:
+    driver: bridge
+    name: playpulse_external
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
+          gateway: 172.20.0.1
+
+  playpulse_internal:
+    driver: bridge
+    name: playpulse_internal
+    internal: true
+    ipam:
+      config:
+        - subnet: 172.21.0.0/16
+          gateway: 172.21.0.1
+
+###########################################
+# VOLUMES
+###########################################
+
+volumes:
+  # Core Data
+  postgres_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${DATA_PATH:-./data}/postgres
+
+  redis_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${DATA_PATH:-./data}/redis
+
+  rabbitmq_data:
+    driver: local
+
+  # Application Data
+  server_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${DATA_PATH:-./data}/servers
+
+  backup_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${DATA_PATH:-./data}/backups
+
+  upload_data:
+    driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ${DATA_PATH:-./data}/uploads
+
+  # Monitoring
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local
+  influxdb_data:
+    driver: local
+  elasticsearch_data:
+    driver: local
+
+  # Security
+  vault_data:
+    driver: local
+  minio_data:
+    driver: local
+
+  # AI/ML
+  jupyter_data:
+    driver: local
+
+  # Game Management
+  game_templates:
+    driver: local
+
+  # Node Management
+  node_metrics:
+    driver: local
+
+  # Logs
+  nginx_logs:
+    driver: local

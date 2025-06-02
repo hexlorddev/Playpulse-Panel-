@@ -1,0 +1,189 @@
+@import 'tailwindcss/base';
+@import 'tailwindcss/components';
+@import 'tailwindcss/utilities';
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  @apply w-2;
+}
+
+::-webkit-scrollbar-track {
+  @apply bg-gray-100 dark:bg-gray-800;
+}
+
+::-webkit-scrollbar-thumb {
+  @apply bg-gray-300 dark:bg-gray-600 rounded-full;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  @apply bg-gray-400 dark:bg-gray-500;
+}
+
+/* Terminal styles */
+.terminal {
+  font-family: 'JetBrains Mono', monospace;
+  @apply bg-gray-900 text-green-400 p-4 rounded-lg;
+}
+
+.terminal .log-line {
+  @apply mb-1 leading-relaxed;
+}
+
+.terminal .log-error {
+  @apply text-red-400;
+}
+
+.terminal .log-warn {
+  @apply text-yellow-400;
+}
+
+.terminal .log-info {
+  @apply text-blue-400;
+}
+
+/* Loading animations */
+.loading-dots {
+  display: inline-block;
+}
+
+.loading-dots::after {
+  content: '';
+  animation: dots 1.5s steps(4, end) infinite;
+}
+
+@keyframes dots {
+  0%, 20% { content: ''; }
+  40% { content: '.'; }
+  60% { content: '..'; }
+  80%, 100% { content: '...'; }
+}
+
+/* Glass morphism effect */
+.glass {
+  @apply backdrop-blur-sm bg-white/10 dark:bg-gray-900/10 border border-white/20 dark:border-gray-700/20;
+}
+
+/* Card hover effects */
+.card-hover {
+  @apply transition-all duration-200 hover:shadow-lg hover:scale-[1.02] hover:bg-gray-50 dark:hover:bg-gray-800/50;
+}
+
+/* Status indicators */
+.status-online {
+  @apply bg-green-500 text-white;
+}
+
+.status-offline {
+  @apply bg-gray-500 text-white;
+}
+
+.status-starting {
+  @apply bg-yellow-500 text-white;
+}
+
+.status-stopping {
+  @apply bg-orange-500 text-white;
+}
+
+.status-error {
+  @apply bg-red-500 text-white;
+}
+
+/* Pulse animation for status dots */
+.pulse-dot {
+  @apply inline-block w-2 h-2 rounded-full mr-2;
+  animation: pulse-dot 2s infinite;
+}
+
+@keyframes pulse-dot {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+/* Form focus styles */
+.form-input {
+  @apply w-full px-4 py-2 border border-gray-300 dark:border-gray-600 rounded-lg 
+         bg-white dark:bg-gray-800 text-gray-900 dark:text-gray-100
+         focus:ring-2 focus:ring-primary-500 focus:border-transparent
+         transition-colors duration-200;
+}
+
+.form-input:disabled {
+  @apply bg-gray-100 dark:bg-gray-700 text-gray-500 dark:text-gray-400 cursor-not-allowed;
+}
+
+/* Button variants */
+.btn-primary {
+  @apply bg-primary-600 hover:bg-primary-700 text-white font-medium px-4 py-2 rounded-lg
+         transition-colors duration-200 focus:ring-2 focus:ring-primary-500 focus:ring-offset-2
+         disabled:opacity-50 disabled:cursor-not-allowed;
+}
+
+.btn-secondary {
+  @apply bg-gray-600 hover:bg-gray-700 text-white font-medium px-4 py-2 rounded-lg
+         transition-colors duration-200 focus:ring-2 focus:ring-gray-500 focus:ring-offset-2
+         disabled:opacity-50 disabled:cursor-not-allowed;
+}
+
+.btn-danger {
+  @apply bg-red-600 hover:bg-red-700 text-white font-medium px-4 py-2 rounded-lg
+         transition-colors duration-200 focus:ring-2 focus:ring-red-500 focus:ring-offset-2
+         disabled:opacity-50 disabled:cursor-not-allowed;
+}
+
+.btn-ghost {
+  @apply text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800 
+         font-medium px-4 py-2 rounded-lg transition-colors duration-200
+         focus:ring-2 focus:ring-gray-500 focus:ring-offset-2;
+}
+
+/* Sidebar styles */
+.sidebar-link {
+  @apply flex items-center px-3 py-2 text-sm font-medium rounded-lg
+         text-gray-600 dark:text-gray-300 hover:bg-gray-100 dark:hover:bg-gray-800
+         transition-colors duration-200;
+}
+
+.sidebar-link.active {
+  @apply bg-primary-100 dark:bg-primary-900/50 text-primary-700 dark:text-primary-300;
+}
+
+/* Notification styles */
+.notification-enter {
+  @apply opacity-0 transform translate-x-full;
+}
+
+.notification-enter-active {
+  @apply opacity-100 transform translate-x-0 transition-all duration-300;
+}
+
+.notification-exit {
+  @apply opacity-100 transform translate-x-0;
+}
+
+.notification-exit-active {
+  @apply opacity-0 transform translate-x-full transition-all duration-300;
+}
+
+/* Mobile responsive utilities */
+@media (max-width: 768px) {
+  .mobile-hidden {
+    @apply hidden;
+  }
+  
+  .mobile-full {
+    @apply w-full;
+  }
+}
+
+/* Dark mode transitions */
+* {
+  @apply transition-colors duration-200;
+}
+
+/* Print styles */
+@media print {
+  .no-print {
+    @apply hidden;
+  }
+}
